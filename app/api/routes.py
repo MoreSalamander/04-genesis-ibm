@@ -28,6 +28,7 @@ class ProposalRequest(BaseModel):
 class AuthorizationRequest(BaseModel):
     decision: str
     note: str = Field(default="", max_length=500)
+    amendments: dict = Field(default_factory=dict)  # whitelisted proposal fields, applied on revise
 
 
 class ActionDeliveryRequest(BaseModel):
@@ -108,9 +109,9 @@ def authorize(dec_id: str, body: AuthorizationRequest, background: BackgroundTas
         raise HTTPException(400, f"decision must be one of {sorted(VALID_DECISIONS)}")
     if dec.status not in (DecisionStatus.RECOMMENDED, DecisionStatus.AWAITING_AUTHORIZATION):
         raise HTTPException(400, f"no recommendation awaiting authorization (status {dec.status.value})")
-    execution = dispatch_authorization(dec.id, body.decision, body.note)
+    execution = dispatch_authorization(dec.id, body.decision, body.note, body.amendments)
     if execution == "local":
-        background.add_task(run_authorization, dec.id, body.decision, body.note)
+        background.add_task(run_authorization, dec.id, body.decision, body.note, body.amendments)
     return {"id": dec.id, "decision": body.decision, "status": "processing", "execution": execution}
 
 

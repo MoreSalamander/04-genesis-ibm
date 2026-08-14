@@ -17,10 +17,10 @@ def run_decision(dec_id: str) -> None:
         executive.incomplete(dec_id, f"in-process stage failed: {err}")
 
 
-def run_authorization(dec_id: str, decision: str, note: str) -> None:
+def run_authorization(dec_id: str, decision: str, note: str, amendments: dict | None = None) -> None:
     executive = get_runtime().executive
     try:
-        outcome = executive.decide(dec_id, decision, note)
+        outcome = executive.decide(dec_id, decision, note, amendments)
         if outcome == "REVISE":
             run_decision(dec_id)
     except Exception as err:
@@ -54,7 +54,7 @@ def dispatch_decision(dec_id: str) -> str:
         return "local"
 
 
-def dispatch_authorization(dec_id: str, decision: str, note: str) -> str:
+def dispatch_authorization(dec_id: str, decision: str, note: str, amendments: dict | None = None) -> str:
     """Signals the durable workflow's human boundary; 'local' on fallback."""
     if settings.force_mock:
         return "local"
@@ -66,7 +66,7 @@ def dispatch_authorization(dec_id: str, decision: str, note: str) -> str:
         async def go():
             client = await Client.connect(settings.temporal_address)
             handle = client.get_workflow_handle(_workflow_id(dec_id))
-            await handle.signal("studio_head_decision", args=[decision, note])
+            await handle.signal("studio_head_decision", args=[decision, note, amendments or {}])
 
         asyncio.run(go())
         return "temporal"

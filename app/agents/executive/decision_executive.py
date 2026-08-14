@@ -119,7 +119,10 @@ class DecisionExecutive:
         return dec.status.value
 
     # -- stage: decide (human signal) ---------------------------------------
-    def decide(self, dec_id: str, decision: str, note: str = "") -> str:
+    AMENDABLE_FIELDS = ("vendor", "amount_usd", "title", "description")
+
+    def decide(self, dec_id: str, decision: str, note: str = "",
+               amendments: dict | None = None) -> str:
         dec = self._get(dec_id)
         decision = decision.lower().strip()
         dec.authorizations.append(AuthorizationRecord(decision=decision, note=note))
@@ -132,7 +135,7 @@ class DecisionExecutive:
                 dec.authorizations.append(AuthorizationRecord(
                     decision="revise",
                     note="approval refused by governance: a VIOLATION stands — revise instead"))
-                return self._revise(dec, "resolve the standing policy violation")
+                return self._revise(dec, "resolve the standing policy violation", None)
             dec.status = DecisionStatus.AUTHORIZED
             draft = self.rt.cognition.generate_json("objective_draft", {
                 "proposal": dec.proposal.model_dump(mode="json", exclude={"evidence"}),
@@ -154,7 +157,7 @@ class DecisionExecutive:
             self.rt.ephemeral.release_latch(DECISION_LATCH)  # Bob delivers on human timescale
             return dec.status.value
         if decision == "revise" and dec.round < MAX_ROUNDS:
-            return self._revise(dec, note)
+            return self._revise(dec, note, amendments)
         if decision == "revise":
             dec.authorizations.append(AuthorizationRecord(
                 decision="rejected", note=f"revision budget exhausted ({MAX_ROUNDS} rounds)"))
@@ -162,9 +165,16 @@ class DecisionExecutive:
         self._finalize(dec, closed_event=True)
         return dec.status.value
 
-    def _revise(self, dec: Decision, guidance: str) -> str:
+    def _revise(self, dec: Decision, guidance: str, amendments: dict | None) -> str:
         if guidance:
             dec.revision_guidance.append(guidance)
+        # A revision may AMEND the proposal on the record (whitelisted fields) —
+        # without this, governance would re-judge the identical proposal forever.
+        for field, value in (amendments or {}).items():
+            if field in self.AMENDABLE_FIELDS and value is not None:
+                setattr(dec.proposal, field,
+                        float(value) if field == "amount_usd" else str(value))
+                dec.revision_guidance.append(f"amended {field} → {value}")
         dec.round += 1
         dec.status = DecisionStatus.EVALUATING
         self._save(dec)

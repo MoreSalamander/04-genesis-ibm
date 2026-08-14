@@ -131,6 +131,20 @@ def test_action_delivery_closes_and_promotes(runtime):
             "action.objective_issued", "action.delivered", "decision.closed"} <= events
 
 
+def test_revise_amendments_change_the_proposal(runtime):
+    from app.workflows.run_decision import run_authorization
+
+    runtime.policy_engine = FlagshipArcEngine()
+    dec = _submit(runtime)
+    run_authorization(dec.id, "revise", "split across two vendors",
+                      {"vendor": "NimbusRender", "ignored_field": "x"})
+    dec = runtime.working.get(dec.id)
+    assert dec.proposal.vendor == "NimbusRender"          # whitelisted field applied
+    assert not hasattr(dec.proposal, "ignored_field")
+    assert any("amended vendor → NimbusRender" in g for g in dec.revision_guidance)
+    assert dec.round == 2
+
+
 def test_latch_released_after_rejection(runtime):
     from app.memory.ephemeral import DECISION_LATCH, LATCH_TTL_S
     from app.workflows.run_decision import run_authorization

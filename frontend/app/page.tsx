@@ -87,12 +87,16 @@ export default function Chamber() {
     } finally { setBusy(false); }
   };
 
+  const [amendVendor, setAmendVendor] = useState("");
+
   const authorize = async (decision: string) => {
     if (!active) return;
     setBusy(true); setError("");
     try {
-      await sendAuthorization(active.id, decision, note);
-      setNote("");
+      const amendments = decision === "revise" && amendVendor.trim()
+        ? { vendor: amendVendor.trim() } : {};
+      await sendAuthorization(active.id, decision, note, amendments);
+      setNote(""); setAmendVendor("");
       await refresh();
     } catch (err) {
       setError(String(err instanceof Error ? err.message : err));
@@ -236,6 +240,11 @@ export default function Chamber() {
                       <div className="authorize-row">
                         <input placeholder="Note for the record (required to request revision)…"
                                value={note} onChange={(e) => setNote(e.target.value)} />
+                        {active.verdict?.outcome === "BLOCKED" && (
+                          <input placeholder="Amend vendor (applied on revision)…"
+                                 value={amendVendor} onChange={(e) => setAmendVendor(e.target.value)}
+                                 style={{ maxWidth: 260 }} />
+                        )}
                         <button className="btn solid" disabled={busy} onClick={() => authorize("approved")}>AUTHORIZE</button>
                         <button className="btn" disabled={busy || !note.trim()} onClick={() => authorize("revise")}>REQUEST REVISION</button>
                         <button className="btn danger" disabled={busy} onClick={() => authorize("rejected")}>REJECT</button>

@@ -144,9 +144,11 @@ export const submitDecision = (proposal: unknown) =>
     method: "POST",
     body: JSON.stringify({ proposal }),
   });
-export const sendAuthorization = (id: string, decision: string, note: string) =>
+export const sendAuthorization = (
+  id: string, decision: string, note: string, amendments: Record<string, unknown> = {},
+) =>
   req<{ status: string }>(`/decisions/${id}/authorization`, {
     method: "POST",
-    body: JSON.stringify({ decision, note }),
+    body: JSON.stringify({ decision, note, amendments }),
   });
 export const getEvents = (limit = 60) => req<Record<string, unknown>[]>(`/events?limit=${limit}`);

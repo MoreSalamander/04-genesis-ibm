@@ -31,8 +31,8 @@ def mark_awaiting_activity(dec_id: str) -> str:
 
 
 @activity.defn(name="ent.decide")
-def decide_activity(dec_id: str, decision: str, note: str) -> str:
-    return _executive().decide(dec_id, decision, note)
+def decide_activity(dec_id: str, decision: str, note: str, amendments: dict | None = None) -> str:
+    return _executive().decide(dec_id, decision, note, amendments)
 
 
 @activity.defn(name="ent.incomplete")

@@ -24,12 +24,15 @@ class EnterpriseDecisionWorkflow:
     def __init__(self) -> None:
         self._decision: str | None = None
         self._note: str = ""
+        self._amendments: dict = {}
 
     @workflow.signal(name="studio_head_decision")
-    def studio_head_decision(self, decision: str, note: str = "") -> None:
+    def studio_head_decision(self, decision: str, note: str = "",
+                             amendments: dict | None = None) -> None:
         if self._decision is None and decision in ("approved", "rejected", "revise"):
             self._decision = decision
             self._note = note
+            self._amendments = amendments or {}
 
     @workflow.query(name="decision")
     def decision(self) -> str | None:
@@ -51,7 +54,7 @@ class EnterpriseDecisionWorkflow:
                 )
 
             # Human boundary: durable pause until the Studio Head decides.
-            self._decision, self._note = None, ""
+            self._decision, self._note, self._amendments = None, "", {}
             try:
                 await workflow.wait_condition(lambda: self._decision is not None,
                                               timeout=AUTHORIZATION_WINDOW)
@@ -59,7 +62,7 @@ class EnterpriseDecisionWorkflow:
                 return await workflow.execute_activity("ent.escalate_timeout", dec_id, **_OPTS)
 
             outcome = await workflow.execute_activity(
-                "ent.decide", args=[dec_id, self._decision, self._note], **_OPTS)
+                "ent.decide", args=[dec_id, self._decision, self._note, self._amendments], **_OPTS)
             if outcome != "REVISE":
                 return outcome
         return await workflow.execute_activity(
