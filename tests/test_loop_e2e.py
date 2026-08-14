@@ -61,6 +61,9 @@ def _submit(rt) -> Decision:
 
 
 def test_pending_engine_never_clears_governance(runtime):
+    from app.governance.engine import PendingPolicyEngine
+
+    runtime.policy_engine = PendingPolicyEngine()  # the stand-in is this test's subject
     dec = _submit(runtime)
     assert dec.status == DecisionStatus.AWAITING_AUTHORIZATION
     assert dec.verdict.outcome == "ESCALATED"          # fail-closed: NEEDS_REVIEW everywhere

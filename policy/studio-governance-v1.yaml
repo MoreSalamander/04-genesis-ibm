@@ -1,0 +1,44 @@
+version: "1"
+policies:
+  - id: budget-threshold
+    clause: >-
+      Capital expenditure above $5,000,000 requires board-level authorisation (VIOLATION).
+      Capital expenditure above $2,000,000 requires studio-head + finance review (NEEDS_REVIEW).
+      Expenditure at or below $2,000,000 is within the studio-head delegation (COMPLIANT).
+    applies_to:
+      - capex
+    rule:
+      type: amount_max
+      field: amount_usd
+      thresholds:
+        - max: 5_000_000
+          above: NEEDS_REVIEW
+        - max: 9_999_999_999
+          above: VIOLATION
+
+  - id: vendor-concentration
+    clause: >-
+      No single vendor may account for more than 25% of trailing-12-month studio spend.
+      Exceeding this cap introduces unacceptable supply-chain concentration risk (VIOLATION).
+      Where no spend baseline is available, human review is required (NEEDS_REVIEW).
+    applies_to:
+      - capex
+      - vendor
+    rule:
+      type: vendor_concentration
+      max_share: 0.25
+      window_days: 365
+      source: ledger
+
+  - id: risk-classification
+    clause: >-
+      Proposals classified as restricted risk class require escalation (VIOLATION).
+      Proposals classified as elevated risk class require additional review (NEEDS_REVIEW).
+      Standard risk class proposals are within normal operating parameters (COMPLIANT).
+    applies_to: "*"
+    rule:
+      type: risk_class
+      classes:
+        standard: COMPLIANT
+        elevated: NEEDS_REVIEW
+        restricted: VIOLATION

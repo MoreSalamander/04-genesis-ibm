@@ -1,0 +1,572 @@
+diff --git a/app/governance/packs.py b/app/governance/packs.py
+new file mode 100644
+index 0000000..a97f0e4
+--- /dev/null
++++ b/app/governance/packs.py
+@@ -0,0 +1,292 @@
++"""Policy pack loader — Bob-built subsystem (locked §2.5a, session 1).
++
++Loads versioned YAML policy packs from `policy/` and evaluates a
++`DecisionProposal` against every applicable rule, returning a list of
++`PolicyFinding` objects that `engine.verdict_from()` turns into a
++`GovernanceVerdict`.
++
++Pure, deterministic, no network, no LLM calls.
++"""
++from __future__ import annotations
++
++import re
++from pathlib import Path
++from typing import Any
++
++import yaml
++
++from app.models.enterprise import DecisionProposal, PolicyFinding, PolicyState
++
++
++# ---------------------------------------------------------------------------
++# Spend-baseline stub (replaced in Session 2 by spend_history.py)
++# ---------------------------------------------------------------------------
++
++def get_vendor_share(vendor: str) -> float | None:  # noqa: ARG001
++    """Return the vendor's trailing-12-month share of studio spend, or None
++    when no baseline is available.  Session 1: always None → fail-closed."""
++    return None
++
++
++# ---------------------------------------------------------------------------
++# Version resolution
++# ---------------------------------------------------------------------------
++
++_VERSION_RE = re.compile(r"-v(\d+(?:\.\d+)*)\.yaml$", re.IGNORECASE)
++
++
++def _pack_files(policy_dir: Path) -> dict[str, Path]:
++    """Return {version_str: path} for all *-v*.yaml files in policy_dir."""
++    found: dict[str, Path] = {}
++    for p in policy_dir.glob("*-v*.yaml"):
++        m = _VERSION_RE.search(p.name)
++        if m:
++            found[m.group(1)] = p
++    return found
++
++
++def _semver_key(v: str) -> tuple[int, ...]:
++    """Convert '1', '1.2', '1.2.3' → tuple for numeric comparison."""
++    return tuple(int(x) for x in v.split("."))
++
++
++def _resolve_version(policy_dir: Path, requested: str) -> tuple[str, Path] | tuple[None, None]:
++    """Return (resolved_version, pack_path), or (None, None) when no pack matches.
++
++    Never raises — callers treat (None, None) as the degraded/missing state.
++    """
++    try:
++        packs = _pack_files(policy_dir)
++    except OSError:
++        return None, None
++    if not packs:
++        return None, None
++    if requested == "latest":
++        version = max(packs, key=_semver_key)
++        return version, packs[version]
++    if requested in packs:
++        return requested, packs[requested]
++    # Fallback: try matching by YAML internal version field
++    for ver, path in packs.items():
++        try:
++            raw = yaml.safe_load(path.read_text())
++            if str(raw.get("version", "")) == requested:
++                return ver, path
++        except OSError:
++            continue
++    return None, None
++
++
++# ---------------------------------------------------------------------------
++# Rule evaluators
++# ---------------------------------------------------------------------------
++
++def _applies(policy: dict[str, Any], proposal: DecisionProposal) -> bool:
++    applies_to = policy.get("applies_to", "*")
++    if applies_to == "*":
++        return True
++    if isinstance(applies_to, str):
++        return proposal.category == applies_to
++    return proposal.category in applies_to
++
++
++def _state_for_amount(amount: float, rule: dict[str, Any]) -> tuple[PolicyState, float]:
++    """Return (state, threshold) for the given amount against an amount_max rule.
++
++    Thresholds list is ordered: the first entry whose `max` is ≥ amount and whose
++    `above` state applies when amount > previous_max defines the bracket.
++
++    Simpler mental model (two-bracket case as in the pack):
++      amount ≤ first_max  → COMPLIANT
++      first_max < amount ≤ second_max → NEEDS_REVIEW
++      amount > second_max → VIOLATION
++    """
++    thresholds: list[dict[str, Any]] = rule.get("thresholds", [])
++    # Sort ascending by max so we test lowest threshold first
++    sorted_t = sorted(thresholds, key=lambda t: t["max"])
++    prev_max = 0.0
++    for t in sorted_t:
++        cap = float(t["max"])
++        if prev_max < amount <= cap:
++            state_str: str = t["above"]
++            return PolicyState(state_str), cap
++        prev_max = cap
++    # above all thresholds → VIOLATION (should be caught by sentinel bracket in YAML)
++    return PolicyState.VIOLATION, prev_max
++
++
++def _make_finding(
++    policy: dict[str, Any],
++    pack_version: str,
++    state: PolicyState,
++    observed: dict[str, Any],
++    threshold: dict[str, Any],
++    detail: str = "",
++) -> PolicyFinding:
++    return PolicyFinding(
++        policy_id=policy["id"],
++        policy_version=pack_version,
++        clause=policy["clause"],
++        state=state,
++        observed=observed,
++        threshold=threshold,
++        detail=detail,
++    )
++
++
++# ---------------------------------------------------------------------------
++# PackPolicyEngine
++# ---------------------------------------------------------------------------
++
++_INTEGRITY_POLICY: dict[str, Any] = {
++    "id": "pack-integrity",
++    "clause": (
++        "Policy pack could not be loaded (missing directory or no matching pack file). "
++        "All proposals require human review until the pack is restored."
++    ),
++}
++
++
++class PackPolicyEngine:
++    """YAML-driven policy engine.  Satisfies the PolicyEngine protocol."""
++
++    def __init__(self, policy_dir: str | Path, version: str = "latest") -> None:
++        self._policy_dir = Path(policy_dir)
++        resolved_ver, pack_path = _resolve_version(self._policy_dir, version)
++        if resolved_ver is None or pack_path is None:
++            # Degraded state: missing dir or no matching packs — never raise
++            self._version = "missing"
++            self._policies: list[dict[str, Any]] = []
++            self._degraded = True
++        else:
++            self._version = resolved_ver
++            raw = yaml.safe_load(pack_path.read_text())
++            self._policies = raw.get("policies", [])
++            self._degraded = False
++
++    @property
++    def version(self) -> str:
++        return self._version
++
++    def evaluate(self, proposal: DecisionProposal) -> list[PolicyFinding]:
++        if self._degraded:
++            return [
++                PolicyFinding(
++                    policy_id="pack-integrity",
++                    policy_version=self._version,
++                    clause=_INTEGRITY_POLICY["clause"],
++                    state=PolicyState.NEEDS_REVIEW,
++                    observed={"policy_dir": str(self._policy_dir)},
++                    threshold={},
++                    detail="Pack missing — fail-closed; restore policy directory to clear",
++                )
++            ]
++        findings: list[PolicyFinding] = []
++        for policy in self._policies:
++            if not _applies(policy, proposal):
++                continue
++            rule: dict[str, Any] = policy.get("rule", {})
++            rule_type: str = rule.get("type", "")
++            finding = self._dispatch(policy, rule, rule_type, proposal)
++            if finding is not None:
++                findings.append(finding)
++        return findings
++
++    def _dispatch(
++        self,
++        policy: dict[str, Any],
++        rule: dict[str, Any],
++        rule_type: str,
++        proposal: DecisionProposal,
++    ) -> PolicyFinding | None:
++        if rule_type == "amount_max":
++            return self._eval_amount_max(policy, rule, proposal)
++        if rule_type == "vendor_concentration":
++            return self._eval_vendor_concentration(policy, rule, proposal)
++        if rule_type == "risk_class":
++            return self._eval_risk_class(policy, rule, proposal)
++        # Unknown rule type — fail-closed
++        return _make_finding(
++            policy, self._version,
++            PolicyState.NEEDS_REVIEW,
++            observed={"rule_type": rule_type},
++            threshold={},
++            detail=f"Unknown rule type {rule_type!r} — fail-closed",
++        )
++
++    # ------------------------------------------------------------------
++    # Individual rule evaluators
++    # ------------------------------------------------------------------
++
++    def _eval_amount_max(
++        self,
++        policy: dict[str, Any],
++        rule: dict[str, Any],
++        proposal: DecisionProposal,
++    ) -> PolicyFinding:
++        amount = proposal.amount_usd
++        state, cap = _state_for_amount(amount, rule)
++        if state in (PolicyState.VIOLATION, PolicyState.NEEDS_REVIEW):
++            pass  # state already correct
++        elif amount <= 0:
++            state = PolicyState.COMPLIANT
++        # Build observed/threshold dicts
++        observed = {"amount_usd": amount}
++        threshold = {"max_usd": cap, "state_above": state.value}
++        return _make_finding(
++            policy, self._version, state,
++            observed=observed,
++            threshold=threshold,
++            detail=f"amount_usd={amount:,.0f} evaluated against cap={cap:,.0f}",
++        )
++
++    def _eval_vendor_concentration(
++        self,
++        policy: dict[str, Any],
++        rule: dict[str, Any],
++        proposal: DecisionProposal,
++    ) -> PolicyFinding:
++        vendor = proposal.vendor or ""
++        max_share: float = float(rule.get("max_share", 0.25))
++        share = get_vendor_share(vendor)
++        if share is None:
++            return _make_finding(
++                policy, self._version,
++                PolicyState.NEEDS_REVIEW,
++                observed={"vendor": vendor, "share": None},
++                threshold={"max_share": max_share},
++                detail="No spend baseline available — fail-closed pending Session 2",
++            )
++        state = PolicyState.VIOLATION if share > max_share else PolicyState.COMPLIANT
++        return _make_finding(
++            policy, self._version, state,
++            observed={"vendor": vendor, "share": share},
++            threshold={"max_share": max_share},
++            detail=f"vendor={vendor!r} share={share:.2%} cap={max_share:.2%}",
++        )
++
++    def _eval_risk_class(
++        self,
++        policy: dict[str, Any],
++        rule: dict[str, Any],
++        proposal: DecisionProposal,
++    ) -> PolicyFinding:
++        # Risk class may be present in evidence items or defaulted to "standard"
++        risk_class = self._extract_risk_class(proposal)
++        classes: dict[str, str] = rule.get("classes", {})
++        state_str = classes.get(risk_class, classes.get("standard", "NEEDS_REVIEW"))
++        state = PolicyState(state_str)
++        return _make_finding(
++            policy, self._version, state,
++            observed={"risk_class": risk_class},
++            threshold={"classes": classes},
++            detail=f"risk_class={risk_class!r} → {state.value}",
++        )
++
++    @staticmethod
++    def _extract_risk_class(proposal: DecisionProposal) -> str:
++        """Read risk_class from evidence metrics; default to 'standard'."""
++        for item in proposal.evidence:
++            if item.metric == "risk_class" and item.statement:
++                return item.statement.strip().lower()
++        return "standard"
+diff --git a/docs/bob-evidence/session-01/plan.md b/docs/bob-evidence/session-01/plan.md
+new file mode 100644
+index 0000000..04bd813
+--- /dev/null
++++ b/docs/bob-evidence/session-01/plan.md
+@@ -0,0 +1,154 @@
++# Session 1 Plan — Policy Pack Schema + Loader
++
++**Bob session:** 1  
++**Target files:** `app/governance/packs.py`, `policy/studio-governance-v1.yaml`  
++**Success gate:** `pytest tests/test_governance_engine.py` green; `app/governance/engine.py` untouched.
++
++---
++
++## Overview
++
++The governance subsystem reserves a slot for the Bob-built `PackPolicyEngine`. Until it
++exists, `get_engine()` in `engine.py` falls back to `PendingPolicyEngine` (fail-closed
++NEEDS_REVIEW everywhere). This session fills that slot: a YAML-driven policy pack loader
++that evaluates proposals against three deterministic rules, producing `PolicyFinding` objects
++the rest of the system already consumes.
++
++The flagship fixture (`seed/proposals.py:FLAGSHIP`) is a $2.8 M capex proposal for vendor
++HelioCompute — it sits above the $2 M NEEDS_REVIEW threshold but below the $5 M VIOLATION
++threshold, so the budget-threshold rule alone returns NEEDS_REVIEW. Vendor-concentration
++in Session 1 is fail-closed (no spend baseline yet — that arrives in Session 2). Risk class
++defaults to `standard` → COMPLIANT.
++
++**No changes to `app/governance/engine.py` or `app/models/enterprise.py`.**
++
++---
++
++## Sub-Tasks
++
++---
++
++### Sub-Task 1 — Policy YAML pack
++
++**Intent:** Author the canonical versioned policy file. This is the machine-readable contract
++for all three rules; the loader (`packs.py`) references it by filename.
++
++**Expected Outcomes:**
++- `policy/studio-governance-v1.yaml` exists and is valid YAML.
++- Contains three policy entries: `budget-threshold`, `vendor-concentration`,
++  `risk-classification`, each with `id`, `clause`, `applies_to`, and a `rule` block.
++- Budget thresholds: ≥$5 M → VIOLATION, ≥$2 M → NEEDS_REVIEW, below → COMPLIANT.
++- Vendor concentration: `max_share: 0.25`, `window_days: 365`, `source: ledger`.
++- Risk classes: `standard: COMPLIANT`, `elevated: NEEDS_REVIEW`, `restricted: VIOLATION`.
++
++**Todo List:**
++1. Create `policy/studio-governance-v1.yaml` with `version: "1"` at the top.
++2. Add the `budget-threshold` policy block (applies_to: capex; rule type: amount_max).
++3. Add the `vendor-concentration` policy block (applies_to: vendor,capex; rule type:
++   vendor_concentration).
++4. Add the `risk-classification` policy block (applies_to: "*"; rule type: risk_class).
++
++**Relevant Context:**
++- Pack schema from SESSION-PLAN.md: `id`, `clause`, `applies_to`, `rule`.
++- Rule shapes: `amount_max`, `vendor_concentration`, `risk_class` — defined in SESSION-PLAN.md.
++- The `version` field of the pack file is what `PackPolicyEngine.version` returns.
++
++**Status:** [ ] pending
++
++---
++
++### Sub-Task 2 — `PackPolicyEngine` loader and rule evaluators (`app/governance/packs.py`)
++
++**Intent:** Implement the Python module that `get_engine()` in `engine.py` imports when it
++exists. The class must satisfy the `PolicyEngine` protocol — no modifications to `engine.py`
++are needed or permitted.
++
++**Expected Outcomes:**
++- `app/governance/packs.py` exists and imports cleanly.
++- `PackPolicyEngine(policy_dir, version)` constructor loads YAML packs from `policy_dir`.
++  - `version="latest"` resolves the highest semver pack file present.
++  - `version="1"` (or any explicit string) loads the pack whose YAML `version` field matches.
++- `engine.version` property returns the resolved pack version string.
++- `evaluate(proposal)` dispatches each policy through its rule evaluator and returns a
++  `list[PolicyFinding]`.
++
++**Rule evaluator behaviour (pure, deterministic, no network):**
++
++| Rule type | Logic |
++|---|---|
++| `amount_max` | Check `proposal.amount_usd` against each threshold bracket; emit the matching `PolicyState`. |
++| `vendor_concentration` | Call `get_vendor_share(vendor) -> float \| None`; if `None` → NEEDS_REVIEW (fail-closed); if above `max_share` → VIOLATION. |
++| `risk_class` | Read `risk_class` from proposal evidence or default `"standard"`; map to `PolicyState`. |
++
++- `applies_to` field: if set to `"*"` the policy always applies; otherwise it applies only when
++  `proposal.category` is in the `applies_to` list. Policies that do not apply produce no finding.
++- Every finding populates `observed` and `threshold` dicts for auditability.
++- `get_vendor_share` stub (Session 1): always returns `None` → always NEEDS_REVIEW for
++  vendor-concentration. Session 2 replaces this with real spend data.
++
++**Todo List:**
++1. Create `app/governance/packs.py` with imports and `PackPolicyEngine` class scaffold.
++2. Implement pack discovery: scan `policy_dir` for `*-v*.yaml` files; parse version numbers;
++   resolve `"latest"` to the highest version.
++3. Implement the YAML loader: parse the selected file into a list of policy dicts.
++4. Implement `applies_to` filtering helper.
++5. Implement `_eval_amount_max(rule, proposal) -> PolicyFinding | None`.
++6. Implement `_eval_vendor_concentration(rule, proposal) -> PolicyFinding | None` with
++   `get_vendor_share` stub returning `None`.
++7. Implement `_eval_risk_class(rule, proposal) -> PolicyFinding | None`.
++8. Implement `evaluate()` — iterate policies, apply filter, dispatch to evaluator, collect findings.
++9. Confirm `engine.get_engine(settings)` returns a `PackPolicyEngine` instance (not `PendingPolicyEngine`).
++
++**Relevant Context:**
++- `PolicyEngine` Protocol: `app/governance/engine.py` lines 31–34.
++- `PolicyFinding` model: `app/models/enterprise.py` lines 82–92 — fields: `id` (auto), `policy_id`,
++  `policy_version`, `clause`, `state: PolicyState`, `observed: dict`, `threshold: dict`, `detail`.
++- `PolicyState` enum: `app/models/enterprise.py` lines 41–45.
++- `DecisionProposal`: `app/models/enterprise.py` lines 59–66 — `category`, `amount_usd`, `vendor`.
++- `get_engine` loader: `app/governance/engine.py` lines 89–96 — does `from app.governance.packs import PackPolicyEngine`.
++- `Settings.policy_dir` = `Path("./policy")`, `Settings.policy_version` = `"latest"`.
++
++**Status:** [ ] pending
++
++---
++
++### Sub-Task 3 — Verify tests pass
++
++**Intent:** Confirm the contract tests all go green without touching `engine.py` or models.
++
++**Expected Outcomes:**
++- `pytest tests/test_governance_engine.py -q` reports 5 passed, 0 failed.
++- `test_get_engine_falls_back_to_pending` passes (engine has `.evaluate`).
++- `test_pending_engine_fails_closed` still passes (unchanged `PendingPolicyEngine`).
++
++**Todo List:**
++1. Run `pytest tests/test_governance_engine.py -q`.
++2. If any test fails, diagnose and fix in `packs.py` or the YAML — not in `engine.py`.
++
++**Relevant Context:**
++- Tests: `tests/test_governance_engine.py` — all five tests, the last uses `Settings(force_mock=True)`
++  which triggers `get_engine` fallback check.
++- The test double `_finding()` helper constructs minimal `PolicyFinding` objects; the evaluator
++  must produce structurally equivalent findings (same fields, correct `state`).
++
++**Status:** [ ] pending
++
++---
++
++## Evidence Artefacts to Capture
++
++After implementation:
++- Save Bob's plan output as `docs/bob-evidence/session-01/plan.md` (this file).
++- Save the conversation record as `docs/bob-evidence/session-01/record.md` (or screenshot).
++- Generate the diff: `git diff HEAD > docs/bob-evidence/session-01/diff.patch`.
++- Commit with message body containing `Built-with: IBM Bob (session 01)`.
++
++---
++
++## What is NOT in Scope (Session 1)
++
++- `app/governance/spend_history.py` — Session 2.
++- Real vendor-concentration baseline — Session 2 (Session 1 stub always returns `None`).
++- `POLICY_VERSION=latest` semver resolution edge cases beyond "pick highest number" — Session 2.
++- Frontend `PolicyFindings.tsx` — Session 3.
++- Software Action execution — Session 4.
+diff --git a/policy/studio-governance-v1.yaml b/policy/studio-governance-v1.yaml
+new file mode 100644
+index 0000000..b85aa1e
+--- /dev/null
++++ b/policy/studio-governance-v1.yaml
+@@ -0,0 +1,44 @@
++version: "1"
++policies:
++  - id: budget-threshold
++    clause: >-
++      Capital expenditure above $5,000,000 requires board-level authorisation (VIOLATION).
++      Capital expenditure above $2,000,000 requires studio-head + finance review (NEEDS_REVIEW).
++      Expenditure at or below $2,000,000 is within the studio-head delegation (COMPLIANT).
++    applies_to:
++      - capex
++    rule:
++      type: amount_max
++      field: amount_usd
++      thresholds:
++        - max: 5_000_000
++          above: NEEDS_REVIEW
++        - max: 9_999_999_999
++          above: VIOLATION
++
++  - id: vendor-concentration
++    clause: >-
++      No single vendor may account for more than 25% of trailing-12-month studio spend.
++      Exceeding this cap introduces unacceptable supply-chain concentration risk (VIOLATION).
++      Where no spend baseline is available, human review is required (NEEDS_REVIEW).
++    applies_to:
++      - capex
++      - vendor
++    rule:
++      type: vendor_concentration
++      max_share: 0.25
++      window_days: 365
++      source: ledger
++
++  - id: risk-classification
++    clause: >-
++      Proposals classified as restricted risk class require escalation (VIOLATION).
++      Proposals classified as elevated risk class require additional review (NEEDS_REVIEW).
++      Standard risk class proposals are within normal operating parameters (COMPLIANT).
++    applies_to: "*"
++    rule:
++      type: risk_class
++      classes:
++        standard: COMPLIANT
++        elevated: NEEDS_REVIEW
++        restricted: VIOLATION
+diff --git a/tests/test_governance_engine.py b/tests/test_governance_engine.py
+index 17091e3..aa8be28 100644
+--- a/tests/test_governance_engine.py
++++ b/tests/test_governance_engine.py
+@@ -43,3 +43,45 @@ def test_get_engine_falls_back_to_pending(monkeypatch):
+     engine = get_engine(Settings(force_mock=True))
+     # until the Bob session lands packs.py, the stand-in must load
+     assert engine.version == "pending-bob-build" or hasattr(engine, "evaluate")
++
++
++# ---------------------------------------------------------------------------
++# PackPolicyEngine resilience tests (session-1 amendment)
++# ---------------------------------------------------------------------------
++
++def test_pack_engine_missing_dir_fails_closed(tmp_path):
++    """A missing policy directory must NOT raise — engine degrades to NEEDS_REVIEW."""
++    from app.governance.packs import PackPolicyEngine
++
++    engine = PackPolicyEngine(tmp_path / "nonexistent", "latest")
++    assert engine.version == "missing"
++    findings = engine.evaluate(FLAGSHIP)
++    assert findings, "degraded engine must still emit a finding"
++    assert all(f.state == PolicyState.NEEDS_REVIEW for f in findings)
++    assert findings[0].policy_id == "pack-integrity"
++
++
++def test_pack_engine_unknown_rule_type_fails_closed(tmp_path):
++    """An unknown rule type in a loaded pack must produce NEEDS_REVIEW, not be skipped."""
++    import yaml
++    from app.governance.packs import PackPolicyEngine
++
++    pack = {
++        "version": "99",
++        "policies": [
++            {
++                "id": "test-unknown-rule",
++                "clause": "A test policy with an unrecognised rule type.",
++                "applies_to": "*",
++                "rule": {"type": "future_rule_not_yet_implemented"},
++            }
++        ],
++    }
++    pack_file = tmp_path / "studio-governance-v99.yaml"
++    pack_file.write_text(yaml.safe_dump(pack))
++
++    engine = PackPolicyEngine(tmp_path, "latest")
++    findings = engine.evaluate(FLAGSHIP)
++    assert findings, "unknown rule type must still produce a finding"
++    assert findings[0].state == PolicyState.NEEDS_REVIEW
++    assert findings[0].policy_id == "test-unknown-rule"
+diff --git a/tests/test_loop_e2e.py b/tests/test_loop_e2e.py
+index daaea4f..1aceb82 100644
+--- a/tests/test_loop_e2e.py
++++ b/tests/test_loop_e2e.py
+@@ -61,6 +61,9 @@ def _submit(rt) -> Decision:
+ 
+ 
+ def test_pending_engine_never_clears_governance(runtime):
++    from app.governance.engine import PendingPolicyEngine
++
++    runtime.policy_engine = PendingPolicyEngine()  # the stand-in is this test's subject
+     dec = _submit(runtime)
+     assert dec.status == DecisionStatus.AWAITING_AUTHORIZATION
+     assert dec.verdict.outcome == "ESCALATED"          # fail-closed: NEEDS_REVIEW everywhere

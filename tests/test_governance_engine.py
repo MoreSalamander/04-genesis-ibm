@@ -43,3 +43,45 @@ def test_get_engine_falls_back_to_pending(monkeypatch):
     engine = get_engine(Settings(force_mock=True))
     # until the Bob session lands packs.py, the stand-in must load
     assert engine.version == "pending-bob-build" or hasattr(engine, "evaluate")
+
+
+# ---------------------------------------------------------------------------
+# PackPolicyEngine resilience tests (session-1 amendment)
+# ---------------------------------------------------------------------------
+
+def test_pack_engine_missing_dir_fails_closed(tmp_path):
+    """A missing policy directory must NOT raise — engine degrades to NEEDS_REVIEW."""
+    from app.governance.packs import PackPolicyEngine
+
+    engine = PackPolicyEngine(tmp_path / "nonexistent", "latest")
+    assert engine.version == "missing"
+    findings = engine.evaluate(FLAGSHIP)
+    assert findings, "degraded engine must still emit a finding"
+    assert all(f.state == PolicyState.NEEDS_REVIEW for f in findings)
+    assert findings[0].policy_id == "pack-integrity"
+
+
+def test_pack_engine_unknown_rule_type_fails_closed(tmp_path):
+    """An unknown rule type in a loaded pack must produce NEEDS_REVIEW, not be skipped."""
+    import yaml
+    from app.governance.packs import PackPolicyEngine
+
+    pack = {
+        "version": "99",
+        "policies": [
+            {
+                "id": "test-unknown-rule",
+                "clause": "A test policy with an unrecognised rule type.",
+                "applies_to": "*",
+                "rule": {"type": "future_rule_not_yet_implemented"},
+            }
+        ],
+    }
+    pack_file = tmp_path / "studio-governance-v99.yaml"
+    pack_file.write_text(yaml.safe_dump(pack))
+
+    engine = PackPolicyEngine(tmp_path, "latest")
+    findings = engine.evaluate(FLAGSHIP)
+    assert findings, "unknown rule type must still produce a finding"
+    assert findings[0].state == PolicyState.NEEDS_REVIEW
+    assert findings[0].policy_id == "test-unknown-rule"
