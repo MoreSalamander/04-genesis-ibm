@@ -85,3 +85,64 @@ def test_pack_engine_unknown_rule_type_fails_closed(tmp_path):
     assert findings, "unknown rule type must still produce a finding"
     assert findings[0].state == PolicyState.NEEDS_REVIEW
     assert findings[0].policy_id == "test-unknown-rule"
+
+
+# ---------------------------------------------------------------------------
+# Session 2 — vendor-concentration with real spend baseline
+# ---------------------------------------------------------------------------
+
+def _pack_engine():
+    """Return a PackPolicyEngine loaded from the real policy directory."""
+    from pathlib import Path
+    from app.governance.packs import PackPolicyEngine
+    return PackPolicyEngine(Path("./policy"), "latest")
+
+
+def test_helio_vendor_concentration_violation():
+    """FLAGSHIP (HelioCompute $2.8M) must produce a vendor-concentration VIOLATION
+    and a BLOCKED verdict once the spend baseline is wired in."""
+    from app.governance.engine import verdict_from
+    engine = _pack_engine()
+    findings = engine.evaluate(FLAGSHIP)
+    vc = next(f for f in findings if f.policy_id == "vendor-concentration")
+    assert vc.state == PolicyState.VIOLATION, (
+        f"Expected VIOLATION, got {vc.state}; share={vc.observed.get('share')}"
+    )
+    assert vc.observed["share"] > 0.25
+    verdict = verdict_from(findings, engine.version)
+    assert verdict.outcome == "BLOCKED"
+
+
+def test_nimbus_vendor_concentration_compliant():
+    """Same $2.8M proposal with NimbusRender vendor must be COMPLIANT."""
+    from app.models.enterprise import DecisionProposal
+    proposal = FLAGSHIP.model_copy(update={"vendor": "NimbusRender"})
+    engine = _pack_engine()
+    findings = engine.evaluate(proposal)
+    vc = next(f for f in findings if f.policy_id == "vendor-concentration")
+    assert vc.state == PolicyState.COMPLIANT, (
+        f"Expected COMPLIANT, got {vc.state}; share={vc.observed.get('share')}"
+    )
+    assert vc.observed["share"] < 0.25
+
+
+def test_empty_vendor_concentration_exempt():
+    """A proposal with no vendor must be EXEMPT for the concentration rule."""
+    proposal = FLAGSHIP.model_copy(update={"vendor": ""})
+    engine = _pack_engine()
+    findings = engine.evaluate(proposal)
+    vc = next(f for f in findings if f.policy_id == "vendor-concentration")
+    assert vc.state == PolicyState.EXEMPT
+
+
+def test_unknown_vendor_concentration_compliant():
+    """An unknown vendor ('Wildcat FX') has $0 existing spend;
+    share ≈ amount/(total+amount) — well below the cap → COMPLIANT."""
+    from app.governance.spend_history import total_baseline_usd
+    proposal = FLAGSHIP.model_copy(update={"vendor": "Wildcat FX"})
+    engine = _pack_engine()
+    findings = engine.evaluate(proposal)
+    vc = next(f for f in findings if f.policy_id == "vendor-concentration")
+    assert vc.state == PolicyState.COMPLIANT
+    expected_share = FLAGSHIP.amount_usd / (total_baseline_usd() + FLAGSHIP.amount_usd)
+    assert abs(vc.observed["share"] - expected_share) < 1e-6

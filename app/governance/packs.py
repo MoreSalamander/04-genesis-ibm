@@ -1,4 +1,4 @@
-"""Policy pack loader — Bob-built subsystem (locked §2.5a, session 1).
+"""Policy pack loader — Bob-built subsystem (locked §2.5a, session 1 + 2).
 
 Loads versioned YAML policy packs from `policy/` and evaluates a
 `DecisionProposal` against every applicable rule, returning a list of
@@ -19,13 +19,10 @@ from app.models.enterprise import DecisionProposal, PolicyFinding, PolicyState
 
 
 # ---------------------------------------------------------------------------
-# Spend-baseline stub (replaced in Session 2 by spend_history.py)
+# Spend baseline — imported from session-2 module
 # ---------------------------------------------------------------------------
 
-def get_vendor_share(vendor: str) -> float | None:  # noqa: ARG001
-    """Return the vendor's trailing-12-month share of studio spend, or None
-    when no baseline is available.  Session 1: always None → fail-closed."""
-    return None
+from app.governance.spend_history import get_vendor_share, total_baseline_usd, _BASELINE as _SPEND_BASELINE  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -246,21 +243,43 @@ class PackPolicyEngine:
         rule: dict[str, Any],
         proposal: DecisionProposal,
     ) -> PolicyFinding:
-        vendor = proposal.vendor or ""
+        vendor = (proposal.vendor or "").strip()
         max_share: float = float(rule.get("max_share", 0.25))
-        share = get_vendor_share(vendor)
+
+        # Empty vendor — rule not applicable
+        if not vendor:
+            return _make_finding(
+                policy, self._version,
+                PolicyState.EXEMPT,
+                observed={"vendor": ""},
+                threshold={"max_share": max_share},
+                detail="No vendor specified — concentration rule not applicable",
+            )
+
+        share = get_vendor_share(vendor, additional_spend_usd=proposal.amount_usd)
+
+        # None baseline — fail-closed
         if share is None:
             return _make_finding(
                 policy, self._version,
                 PolicyState.NEEDS_REVIEW,
                 observed={"vendor": vendor, "share": None},
                 threshold={"max_share": max_share},
-                detail="No spend baseline available — fail-closed pending Session 2",
+                detail="No spend baseline available — fail-closed",
             )
+
+        existing_spend = _SPEND_BASELINE.get(vendor, 0.0)
+        total_spend = total_baseline_usd() + proposal.amount_usd
         state = PolicyState.VIOLATION if share > max_share else PolicyState.COMPLIANT
         return _make_finding(
             policy, self._version, state,
-            observed={"vendor": vendor, "share": share},
+            observed={
+                "vendor": vendor,
+                "share": round(share, 6),
+                "existing_spend_usd": existing_spend,
+                "proposed_spend_usd": proposal.amount_usd,
+                "total_baseline_usd": total_spend,
+            },
             threshold={"max_share": max_share},
             detail=f"vendor={vendor!r} share={share:.2%} cap={max_share:.2%}",
         )
