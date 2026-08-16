@@ -38,6 +38,13 @@ def dispatch_decision(dec_id: str) -> str:
         runtime_proof.record("temporal", "MOCK",
                              "GENESIS_MOCK set — in-process execution by design")
         return "local"
+    if not settings.temporal_address:
+        # Not part of this deployment (e.g. Cloud Run). Attempting a dial would
+        # report DEGRADED, which reads as a fault rather than an absent
+        # substrate — so say what is actually true and run in-process.
+        runtime_proof.record("temporal", "MOCK",
+                             "no TEMPORAL_ADDRESS — in-process execution for this deployment")
+        return "local"
     try:
         import asyncio
 
@@ -66,6 +73,13 @@ def dispatch_authorization(dec_id: str, decision: str, note: str, amendments: di
     if settings.force_mock:
         runtime_proof.record("temporal", "MOCK",
                              "GENESIS_MOCK set — in-process execution by design")
+        return "local"
+    if not settings.temporal_address:
+        # Not part of this deployment (e.g. Cloud Run). Attempting a dial would
+        # report DEGRADED, which reads as a fault rather than an absent
+        # substrate — so say what is actually true and run in-process.
+        runtime_proof.record("temporal", "MOCK",
+                             "no TEMPORAL_ADDRESS — in-process execution for this deployment")
         return "local"
     try:
         import asyncio
