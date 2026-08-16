@@ -84,8 +84,12 @@ def _runtime_proof(settings, policy_version: str) -> dict:
                       if settings.confluent_live
                       else ("MOCK", "no Confluent credentials — local append-only ledger file")),
         "policy": ("LIVE", f"policy pack {policy_version} evaluated in code (built with IBM Bob)"),
-        "temporal": ("IDLE", f"configured at {settings.temporal_address} — "
-                             "no workflow dispatched yet this session"),
+        # An unset address means Temporal is not part of this deployment, not
+        # that it broke — dialling it would report DEGRADED and read as a fault.
+        "temporal": (("IDLE", f"configured at {settings.temporal_address} — "
+                              "no workflow dispatched yet this session")
+                     if settings.temporal_address
+                     else ("MOCK", "no TEMPORAL_ADDRESS — in-process execution for this deployment")),
         "datahub": ("IDLE", f"configured at {settings.datahub_gms_url} — nothing promoted yet"),
     })
 
