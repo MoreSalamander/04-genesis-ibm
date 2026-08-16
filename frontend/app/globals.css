@@ -23,6 +23,18 @@
   --exempt: #6f7680;
   --mono: "SF Mono", "Cascadia Mono", ui-monospace, monospace;
   --serif: "Palatino", "Palatino Linotype", Georgia, serif;
+
+  /* The alive layer maps onto this console's palette (see alive.css).
+     Governance chamber: brass on charcoal, candle-warm. */
+  --alive-accent: var(--brass);
+  --alive-ink: var(--ivory);
+  --alive-muted: var(--ivory-soft);
+  --alive-line: var(--rule);
+  --alive-glow: rgba(201, 162, 75, 0.16);
+  --alive-veil: rgba(23, 25, 29, 0.88);
+  --alive-ok: var(--clear);
+  --alive-warn: var(--escalated);
+  --alive-bad: var(--blocked);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -74,10 +86,6 @@ body {
 .btn.solid:hover { background: #d9b35e; }
 .btn.danger { border-color: var(--blocked); color: var(--blocked); }
 .btn.danger:hover { background: rgba(196, 85, 77, 0.12); }
-.error-note {
-  width: 100%; padding: 10px 14px; border-left: 3px solid var(--blocked);
-  background: rgba(196, 85, 77, 0.08); font: 12.5px var(--mono); color: #e0928c;
-}
 
 /* status rail */
 .stage-rail { display: flex; margin: 24px 0 8px; font: 10.5px var(--mono); }
@@ -115,6 +123,46 @@ body {
   color: var(--brass-dim); min-width: 78px; padding-top: 3px;
 }
 .evidence-item .metric { font: 11.5px var(--mono); color: var(--ivory-faint); }
+/* Lit by a score card's evidence chip — the wiring made visible. */
+.evidence-item.lit {
+  background: var(--brass-soft);
+  box-shadow: inset 3px 0 0 var(--brass);
+}
+.evidence-item.lit .metric { color: var(--brass); }
+
+/* Evidence citations on a score card (item 16) */
+.score-row .cited { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.score-row .cited-label {
+  font: 9.5px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ivory-faint);
+}
+.ev-chip {
+  font: 10px var(--mono); letter-spacing: 0.04em; padding: 2px 7px; border-radius: 2px;
+  color: var(--ivory-soft); background: transparent;
+  border: 1px solid var(--rule); cursor: pointer;
+}
+.ev-chip:hover, .ev-chip:focus-visible {
+  color: var(--brass); border-color: var(--brass); background: var(--brass-soft); outline: none;
+}
+
+/* Compliant alternates offered on a BLOCKED verdict (item 18) */
+.alternates { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.alt-label {
+  font: 9.5px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ivory-faint);
+}
+.alt-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  font: 700 11px var(--mono); letter-spacing: 0.06em; padding: 5px 10px; border-radius: 2px;
+  color: var(--clear); background: rgba(79, 157, 112, 0.08);
+  border: 1px solid var(--clear); cursor: pointer;
+}
+.alt-chip:hover { background: rgba(79, 157, 112, 0.18); }
+.alt-chip .alt-share { font-weight: 400; color: var(--ivory-soft); }
+
+/* In-flight authorization feedback (item 17) */
+.in-flight {
+  margin-top: 12px; padding: 9px 13px; border-left: 3px solid var(--brass);
+  background: var(--brass-soft); font: 11.5px var(--mono); color: var(--brass);
+}
 
 /* scores */
 .score-row {
@@ -192,6 +240,24 @@ body {
 .objective-card { background: var(--panel); border: 1px solid var(--rule); padding: 16px 18px; }
 .objective-card .obj { font-size: 15px; font-weight: 700; color: var(--brass); }
 .objective-card ul { margin: 10px 0 0 18px; font-size: 13px; color: var(--ivory-soft); }
+/* Acceptance-criteria checklist on the objective card (item 19).
+   The findings panel above is Bob's slot — this is the objective card only. */
+.acceptance { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.acc-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  font: 10px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--brass-dim);
+}
+.acc-head .acc-count { color: var(--ivory-faint); letter-spacing: 0.06em; }
+.acc-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.acc-list li {
+  display: flex; gap: 9px; align-items: flex-start;
+  font-size: 13px; color: var(--ivory-soft); padding: 4px 0;
+}
+.acc-list li .box { font-size: 14px; line-height: 1.2; color: var(--ivory-faint); flex: none; }
+.acc-list li.met { color: var(--ivory); }
+.acc-list li.met .box { color: var(--clear); }
+.acc-caveat { margin-top: 8px; font: 10.5px/1.5 var(--mono); color: var(--ivory-faint); }
+
 .action-delivered {
   margin-top: 12px; padding: 12px 14px; border-left: 3px solid var(--clear);
   background: rgba(79, 157, 112, 0.07); font: 12.5px var(--mono); color: var(--clear);

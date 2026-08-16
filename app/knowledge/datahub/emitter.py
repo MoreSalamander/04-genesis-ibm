@@ -7,6 +7,7 @@ them. Outages degrade to log lines and never fail a decision.
 from __future__ import annotations
 
 from app.config import Settings
+from app import runtime_proof
 from app.models.enterprise import Decision
 
 
@@ -19,8 +20,20 @@ class DataHubKnowledge:
                 from datahub.emitter.rest_emitter import DatahubRestEmitter
 
                 self._emitter = DatahubRestEmitter(gms_server=settings.datahub_gms_url)
+                # A constructed client proves configuration, not reachability —
+                # so this stays IDLE until an emit actually lands.
+                runtime_proof.record(
+                    "datahub", "IDLE",
+                    f"client ready for {settings.datahub_gms_url}; nothing promoted yet")
             except ImportError:
                 print("[knowledge] acryl-datahub not importable — DataHub promotion disabled")
+                runtime_proof.record(
+                    "datahub", "DEGRADED",
+                    "DATAHUB_GMS_URL is set but acryl-datahub is not installed")
+        else:
+            runtime_proof.record(
+                "datahub", "MOCK",
+                "no DATAHUB_GMS_URL (or GENESIS_MOCK set) — local graph store only")
 
     @property
     def available(self) -> bool:
@@ -98,7 +111,10 @@ class DataHubKnowledge:
                                   type=DatasetLineageTypeClass.TRANSFORMED)
                 ]),
             ))
+            runtime_proof.record("datahub", "LIVE",
+                                 f"decision lineage emitted to {self.settings.datahub_gms_url}")
             return [urn]
         except Exception as err:
             print(f"[knowledge] DataHub promotion failed: {err}")
+            runtime_proof.record("datahub", "DEGRADED", f"promotion failed ({err})")
             return []

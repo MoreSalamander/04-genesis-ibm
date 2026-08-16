@@ -1,3 +1,5 @@
+import type { RuntimeProof } from "@/lib/alive";
+
 // Typed client for the Enterprise Decision Intelligence API (via the runtime proxy).
 
 export interface SystemStatus {
@@ -7,6 +9,8 @@ export interface SystemStatus {
   confluent_live: boolean;
   policy_engine: string;
   decisions: number;
+  /** Substrate states for the runtime-proof footer (app/runtime_proof.py). */
+  runtime_proof?: RuntimeProof;
 }
 
 export interface EvidenceItem {
@@ -147,8 +151,22 @@ export const submitDecision = (proposal: unknown) =>
 export const sendAuthorization = (
   id: string, decision: string, note: string, amendments: Record<string, unknown> = {},
 ) =>
-  req<{ status: string }>(`/decisions/${id}/authorization`, {
-    method: "POST",
-    body: JSON.stringify({ decision, note, amendments }),
-  });
+  req<{ id: string; decision: string; status: string; execution: string }>(
+    `/decisions/${id}/authorization`,
+    { method: "POST", body: JSON.stringify({ decision, note, amendments }) },
+  );
 export const getEvents = (limit = 60) => req<Record<string, unknown>[]>(`/events?limit=${limit}`);
+
+/** Vendors the proposal could be amended to without breaching concentration.
+ *  The backend judges each one with the real policy engine, so anything listed
+ *  here is guaranteed to clear the same rule that blocked the current vendor. */
+export interface VendorAlternate {
+  vendor: string;
+  share: number;
+  cap: number | null;
+  existing_spend_usd: number;
+  total_baseline_usd: number;
+  policy_version: string;
+}
+export const getVendorAlternates = (id: string) =>
+  req<VendorAlternate[]>(`/decisions/${id}/vendor-alternates`);
